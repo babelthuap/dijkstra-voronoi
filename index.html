@@ -39,37 +39,34 @@ const pair = (x, y) => (x << 15) + y;
 
 
 // basic queue
-const Queue = (() => {
-  function Queue() {
-    this.head = null;
-    this.tail = null;
+function Queue() {
+  this.head = null;
+  this.tail = null;
+}
+Queue.prototype.isEmpty = function() {
+  return this.head === null
+};
+Queue.prototype.hasNext = function() {
+  return this.head !== null;
+};
+Queue.prototype.push = function(value) {
+  const node = {value: value, next: null};
+  if (this.head === null) {
+    this.head = this.tail = node;
+  } else {
+    this.tail.next = node;
+    this.tail = node;
   }
-  Queue.prototype.isEmpty = function() {
-    return this.head === null
-  };
-  Queue.prototype.hasNext = function() {
-    return this.head !== null;
-  };
-  Queue.prototype.push = function(value) {
-    const node = {value: value, next: null};
-    if (this.head === null) {
-      this.head = this.tail = node;
-    } else {
-      this.tail.next = node;
-      this.tail = node;
-    }
-  };
-  Queue.prototype.pop = function() {
-    if (this.head === null) {
-      return undefined;
-    } else {
-      const value = this.head.value;
-      this.head = this.head.next;
-      return value;
-    }
-  };
-  return Queue;
-})();
+};
+Queue.prototype.pop = function() {
+  if (this.head === null) {
+    return undefined;
+  } else {
+    const value = this.head.value;
+    this.head = this.head.next;
+    return value;
+  }
+};
 
 
 // general-purpose priority queue based on a binary tree min-heap
@@ -264,9 +261,6 @@ function Bitmap() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, width, height);
   let imageData = ctx.getImageData(0, 0, width, height);
-  // attach to dom
-  [...CANVAS_CONTAINER.children].forEach(child => child.remove());
-  CANVAS_CONTAINER.appendChild(canvas);
   // methods
   return {
     get width() {
@@ -274,6 +268,10 @@ function Bitmap() {
     },
     get height() {
       return height;
+    },
+    attachToDom() {
+      [...CANVAS_CONTAINER.children].forEach(child => child.remove());
+      CANVAS_CONTAINER.appendChild(canvas);
     },
     repaint() {
       ctx.putImageData(imageData, 0, 0);
@@ -288,11 +286,18 @@ function Bitmap() {
 }
 
 
+// only create new bitmap on window resize
+let bitmap = new Bitmap();
+window.addEventListener('resize', () => {
+  bitmap = new Bitmap();
+});
+
+
 function renderVoronoi() {
   const start = performance.now();
 
   // init bitmap
-  const bitmap = new Bitmap();
+  bitmap.attachToDom();
   const width = bitmap.width;
   const height = bitmap.height;
 
@@ -322,13 +327,12 @@ function renderVoronoi() {
   })();
 
   // precomputed dijkstra
-  const visited =
-      new Array(height).fill().map(() => new Array(width));
+  const visited = new Array(height * width);
   const priorityQueue =
       new MonotonicBucketQueue(/* maxConcurrentPriorities= */ 86);
   for (let id = 0; id < cells.length; id++) {
     const cell = cells[id];
-    visited[cell.y][cell.x] = true;
+    visited[cell.x + width * cell.y] = true;
     priorityQueue.push(0, {x: cell.x, y: cell.y, cell});
   }
   while (priorityQueue.hasNext()) {
@@ -346,8 +350,9 @@ function renderVoronoi() {
         if (nbrY === -1 || nbrY === height) {  // check bounds
           continue;
         }
-        if (visited[nbrY][nbrX] === undefined) {
-          visited[nbrY][nbrX] = true;
+        const visitedIndex = nbrX + width * nbrY;
+        if (visited[visitedIndex] === undefined) {
+          visited[visitedIndex] = true;
           const priority = nbrs[i + 1];
           priorityQueue.push(priority, {x: nbrX, y: nbrY, cell});
         }
