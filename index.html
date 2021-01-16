@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Animated Voronoi</title>
+<style>
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+body {
+  background-color: #000;
+}
+#canvasContainer {
+  position: fixed;
+  left: 0;
+  top: 0;
+  height: 100vh;
+  width: 100vw;
+}
+</style>
+<body>
+<div id="canvasContainer"></div>
+<script>
+'use strict';
+
+const CANVAS_CONTAINER = document.getElementById('canvasContainer');
+
+const NBR_8 =
+    [[1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1]];
+
+const rand = (n) => Math.floor(Math.random() * n);
+
+const MASK = 2 ** 15 - 1;
+const pair = (x, y) => (x << 15) + y;
+
+
+// basic queue
+const Queue = (() => {
+  function Queue() {
+    this.head = null;
+    this.tail = null;
+  }
+  Queue.prototype.isEmpty = function() {
+    return this.head === null
+  };
+  Queue.prototype.hasNext = function() {
+    return this.head !== null;
+  };
+  Queue.prototype.push = function(value) {
+    const node = {value: value, next: null};
+    if (this.head === null) {
+      this.head = this.tail = node;
+    } else {
+      this.tail.next = node;
+      this.tail = node;
+    }
+  };
+  Queue.prototype.pop = function() {
+    if (this.head === null) {
+      return undefined;
+    } else {
+      const value = this.head.value;
+      this.head = this.head.next;
+      return value;
+    }
+  };
+  return Queue;
+})();
+
+
+// general-purpose priority queue based on a binary tree min-heap
+function PriorityQueue() {
+  const heap = [];
+  const parent = i => (i - 1) >> 1;
+  const leftChild = i => (i << 1) + 1;
+  const rightChild = i => (i + 1) << 1;
+  return {
+    get size() {
+      return heap.length;
+    },
+    push(priority, value) {
+      heap.push([priority, value]);
+      // percolate up
+      let i = heap.length - 1;
+      const node = heap[i];
+      while (i > 0) {
+        const p = parent(i);
+        if (heap[p][0] > node[0]) {
+          heap[i] = heap[p];
+          i = p;
+        } else {
+          break;
+        }
+      }
+      heap[i] = node;
+    },
+    pop() {
+      if (heap.length === 1) {
+        return heap.pop()[1];
+      }
+      const value = heap[0][1];
+      // percolate down
+      const node = heap[0] = heap.pop();
+      const size = heap.length;
+      let i = 0;
+      while (i < (size >> 1)) {
+        const left = leftChild(i);
+        const right = rightChild(i);
+        const minChild =
+            (right < size && heap[right][0] < heap[left][0]) ?
+            right :
+            left;
+        if (heap[minChild][0] > node[0]) {
+          break;
+        }
+        heap[i] = heap[minChild];
+        i = minChild;
+      }
+      heap[i] = node;
+      return value;
+    },
+  };
+}
+
+
+// min priority queue with priorities limited to 0..maxPriority, whose caller is
+// guaranteed to never push a lower-priority item after popping all items of
+// that priority
+function MonotonicBucketQueue(maxConcurrentPriorities) {
+  const buckets =
+      new Array(maxConcurrentPriorities).fill().map(() => new Queue());
+  let index = 0;
+  return {
+    isEmpty() {
+      return buckets[index].isEmpty();
+    },
+    hasNext() {
+      return buckets[index].hasNext();
+    },
+    push(priority, value) {
+      buckets[priority % maxConcurrentPriorities].push(value);
+    },
+    pop() {
+      const value = buckets[index].pop();
+      if (buckets[index].isEmpty()) {
+        index = (index + 1) % maxConcurrentPriorities;
+      }
+      return value;
+    },
+  };
+}
+
+
+// generate searchSequence map, of the form
+// pair(dx, dy) -> [nbrIndex1, priority1, nbrIndex2, priority2, ...],
+const searchSequenceMap = (() => {
+  const start = performance.now();
+
+  if (localStorage.searchSequence !== undefined) {
+    const map = new Map(JSON.parse(localStorage.searchSequence));
+    console.log(
+        'read searchSequence from localStorage: ' +
+        (performance.now() - start).toFixed(0) + 'ms');
+    return map;
+  }
+
+  /************/
+  /** RADIUS **/
+  /************/
+  const R = 127;
+
+  const norm = (x, y) => x * x + y * y;
+
+  const norms = new Set();
+  for (let x = 0; x <= R; x++) {
+    for (let y = 0; y <= R; y++) {
+      const n = norm(x, y);
+      if (n <= R * R) {
+        norms.add(n);
+      }
+    }
+  }
+  const allNorms = [...norms].sort((a, b) => a - b);
+  const normToPriority = allNorms.reduce((map, n, i) => {
+    map.set(n, i);
+    return map;
+  }, new Map());
+
+  const searchSequence = [];
+  const visited = new Set([0]);
+
+  const getNbrs = (x, y) => {
+    const nbrs = [];
+    for (let i = 0; i < NBR_8.length; i++) {
+      const nbrX = x + NBR_8[i][0];
+      const nbrY = y + NBR_8[i][1];
+      let p = pair(nbrX, nbrY);
+      if (visited.has(p)) {
+        continue;
+      } else {
+        const priority = normToPriority.get(norm(nbrX, nbrY));
+        if (priority <= allNorms.length) {
+          nbrs.push([i, priority]);
+        }
+      }
+    }
+    return nbrs;
+  };
+
+  // dijkstra
+  const priorityQueue = new PriorityQueue();
+  priorityQueue.push(0, {x: 0, y: 0});
+  while (priorityQueue.size > 0) {
+    const {x, y} = priorityQueue.pop();
+    const nbrs = getNbrs(x, y);
+    searchSequence.push([x, y, ...nbrs.flatMap(e => e)]);
+    for (const [i, priority] of nbrs) {
+      const nbrX = x + NBR_8[i][0];
+      const nbrY = y + NBR_8[i][1];
+      visited.add(pair(nbrX, nbrY));
+      if (priority <= allNorms.length) {
+        priorityQueue.push(priority, {x: nbrX, y: nbrY});
+      }
+    }
+  }
+
+  // then this can actually be used in the search algorithm:
+  const map =
+      // filter out pixels with no neighbor info
+      searchSequence.filter(entry => entry.length > 2).reduce((map, entry) => {
+        map.set(pair(entry[0], entry[1]), entry.slice(2));
+        return map;
+      }, new Map());
+
+  console.log(
+      'generate searchSequence: ' + (performance.now() - start).toFixed(0) +
+      'ms');
+
+  setTimeout(() => {
+    // store in localStorage
+    const mapStr = JSON.stringify([...map.entries()]);
+    console.log('storing ' + mapStr.length + ' bytes');
+    localStorage.searchSequence = mapStr;
+  }, 0);
+
+  return map;
+})();
+
+
+// convenience methods for drawing pixels on a canvas
+function Bitmap() {
+  // fill the entire container
+  const width = CANVAS_CONTAINER.offsetWidth;
+  const height = CANVAS_CONTAINER.offsetHeight;
+  // reset the canvas element
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, width, height);
+  let imageData = ctx.getImageData(0, 0, width, height);
+  // attach to dom
+  [...CANVAS_CONTAINER.children].forEach(child => child.remove());
+  CANVAS_CONTAINER.appendChild(canvas);
+  // methods
+  return {
+    get width() {
+      return width;
+    },
+    get height() {
+      return height;
+    },
+    repaint() {
+      ctx.putImageData(imageData, 0, 0);
+    },
+    setPixel(x, y, rgb) {
+      const red = 4 * (x + width * y);
+      imageData.data[red] = rgb[0];
+      imageData.data[red + 1] = rgb[1];
+      imageData.data[red + 2] = rgb[2];
+    },
+  };
+}
+
+
+function renderVoronoi() {
+  const start = performance.now();
+
+  // init bitmap
+  const bitmap = new Bitmap();
+  const width = bitmap.width;
+  const height = bitmap.height;
+
+  /***************/
+  /** NUM CELLS **/
+  /***************/
+  const numCells = Math.floor(width * height / 5000);
+
+  // place cells
+  const cells = (() => {
+    const cells = new Array(numCells);
+    const centers = new Set();
+    // thirds - so we don't place cells in adjacent pixels
+    const w = Math.floor(width / 3);
+    const h = Math.floor(height / 3);
+    for (let id = 0; id < numCells; id++) {
+      let x, y;
+      do {
+        x = rand(w) * 3;
+        y = rand(h) * 3;
+      } while (centers.has(pair(x, y)));
+      centers.add(pair(x, y));
+      const color = Uint8ClampedArray.from([rand(256), rand(256), rand(256)]);
+      cells[id] = {x: x + 1, y: y + 1, color};
+    }
+    return cells;
+  })();
+
+  // precomputed dijkstra
+  const visited =
+      new Array(height).fill().map(() => new Array(width));
+  const priorityQueue =
+      new MonotonicBucketQueue(/* maxConcurrentPriorities= */ 86);
+  for (let id = 0; id < cells.length; id++) {
+    const cell = cells[id];
+    visited[cell.y][cell.x] = true;
+    priorityQueue.push(0, {x: cell.x, y: cell.y, cell});
+  }
+  while (priorityQueue.hasNext()) {
+    const {x, y, cell} = priorityQueue.pop();
+    bitmap.setPixel(x, y, cell.color);
+    const nbrs = searchSequenceMap.get(pair(x - cell.x, y - cell.y));
+    if (nbrs !== undefined) {
+      for (let i = 0; i < nbrs.length; i += 2) {
+        const nbrIndex = nbrs[i];
+        const nbrX = x + NBR_8[nbrIndex][0];
+        if (nbrX === -1 || nbrX === width) {  // check bounds
+          continue;
+        }
+        const nbrY = y + NBR_8[nbrIndex][1];
+        if (nbrY === -1 || nbrY === height) {  // check bounds
+          continue;
+        }
+        if (visited[nbrY][nbrX] === undefined) {
+          visited[nbrY][nbrX] = true;
+          const priority = nbrs[i + 1];
+          priorityQueue.push(priority, {x: nbrX, y: nbrY, cell});
+        }
+      }
+    }
+  }
+  bitmap.repaint();
+
+  console.log('render: ' + (performance.now() - start).toFixed(0) + 'ms');
+}
+
+renderVoronoi();
+document.body.addEventListener('click', () => {
+  renderVoronoi();
+});
+</script>
+</body>
+</html>
