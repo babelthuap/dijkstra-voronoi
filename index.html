@@ -37,6 +37,7 @@ const rand = (n) => Math.floor(Math.random() * n);
 const MASK = 2 ** 15 - 1;
 const pair = (x, y) => (x << 15) + y;
 
+const euclideanDist = (x1, y1, x2, y2) => (x1 - x2) ** 2 + (y1 - y2) ** 2;
 
 // basic queue
 function Queue() {
@@ -152,99 +153,108 @@ function MonotonicBucketQueue(maxConcurrentPriorities) {
 }
 
 
-// generate searchSequence map, of the form
-// pair(dx, dy) -> [nbrIndex1, priority1, nbrIndex2, priority2, ...],
-const searchSequenceMap = (() => {
+// generate searchSequence, of the form
+// [
+//   [dx, dy, nbrIndex1, nbrPriority1, nbrIndex2, nbrPriority2, ...],
+//   ...
+// ]
+// where the nbrIndexes are other indexes in searchSequence itself
+const searchSequence = (() => {
   const start = performance.now();
 
+  let searchSequence;
   if (localStorage.searchSequence !== undefined) {
-    const map = new Map(JSON.parse(localStorage.searchSequence));
-    console.log(
-        'read searchSequence from localStorage: ' +
-        (performance.now() - start).toFixed(0) + 'ms');
-    return map;
-  }
+    searchSequence = JSON.parse(localStorage.searchSequence);
+  } else {
+    /************/
+    /** RADIUS **/
+    /************/
+    const R = 127;
 
-  /************/
-  /** RADIUS **/
-  /************/
-  const R = 127;
+    const norm = (x, y) => x * x + y * y;
 
-  const norm = (x, y) => x * x + y * y;
-
-  const norms = new Set();
-  for (let x = 0; x <= R; x++) {
-    for (let y = 0; y <= R; y++) {
-      const n = norm(x, y);
-      if (n <= R * R) {
-        norms.add(n);
-      }
-    }
-  }
-  const allNorms = [...norms].sort((a, b) => a - b);
-  const normToPriority = allNorms.reduce((map, n, i) => {
-    map.set(n, i);
-    return map;
-  }, new Map());
-
-  const searchSequence = [];
-  const visited = new Set([0]);
-
-  const getNbrs = (x, y) => {
-    const nbrs = [];
-    for (let i = 0; i < NBR_8.length; i++) {
-      const nbrX = x + NBR_8[i][0];
-      const nbrY = y + NBR_8[i][1];
-      let p = pair(nbrX, nbrY);
-      if (visited.has(p)) {
-        continue;
-      } else {
-        const priority = normToPriority.get(norm(nbrX, nbrY));
-        if (priority <= allNorms.length) {
-          nbrs.push([i, priority]);
+    const norms = new Set();
+    for (let x = 0; x <= R; x++) {
+      for (let y = 0; y <= R; y++) {
+        const n = norm(x, y);
+        if (n <= R * R) {
+          norms.add(n);
         }
       }
     }
-    return nbrs;
-  };
+    const allNorms = [...norms].sort((a, b) => a - b);
+    const normToPriority = allNorms.reduce((map, n, i) => {
+      map.set(n, i);
+      return map;
+    }, new Map());
 
-  // dijkstra
-  const priorityQueue = new PriorityQueue();
-  priorityQueue.push(0, {x: 0, y: 0});
-  while (priorityQueue.size > 0) {
-    const {x, y} = priorityQueue.pop();
-    const nbrs = getNbrs(x, y);
-    searchSequence.push([x, y, ...nbrs.flatMap(e => e)]);
-    for (const [i, priority] of nbrs) {
-      const nbrX = x + NBR_8[i][0];
-      const nbrY = y + NBR_8[i][1];
-      visited.add(pair(nbrX, nbrY));
-      if (priority <= allNorms.length) {
-        priorityQueue.push(priority, {x: nbrX, y: nbrY});
+    searchSequence = [];
+    const visited = new Set([0]);
+    const pairToSequenceIndex = new Map();
+
+    const getNbrs = (x, y) => {
+      const nbrs = [];
+      for (let i = 0; i < NBR_8.length; i++) {
+        const nbrX = x + NBR_8[i][0];
+        const nbrY = y + NBR_8[i][1];
+        const pr = pair(nbrX, nbrY);
+        if (visited.has(pr)) {
+          continue;
+        } else {
+          const priority = normToPriority.get(norm(nbrX, nbrY));
+          if (priority <= allNorms.length) {
+            nbrs.push([priority, i, pr]);
+          }
+        }
       }
+      return nbrs;
+    };
+
+    // dijkstra
+    const priorityQueue = new PriorityQueue();
+    priorityQueue.push(0, {pr: 0, x: 0, y: 0});
+    while (priorityQueue.size > 0) {
+      const {pr, x, y} = priorityQueue.pop();
+      const nbrs = getNbrs(x, y);
+      pairToSequenceIndex.set(pr, searchSequence.length);
+      searchSequence.push([x, y, nbrs]);
+      for (const [priority, i, pr] of nbrs) {
+        const nbrX = x + NBR_8[i][0];
+        const nbrY = y + NBR_8[i][1];
+        const pr = pair(nbrX, nbrY);
+        visited.add(pr);
+        if (priority <= allNorms.length) {
+          priorityQueue.push(priority, {pr: pr, x: nbrX, y: nbrY});
+        }
+      }
+    }
+
+    // make sequence refence itself by index - this is the one we can serialize
+    for (let i = 0; i < searchSequence.length; i++) {
+      const [x, y, nbrs] = searchSequence[i];
+      const selfReferentialNbrs =
+          searchSequence[i][2].flatMap(([priority, _, pr]) => {
+            return [pairToSequenceIndex.get(pr), priority];
+          });
+      searchSequence[i] = [x, y, ...selfReferentialNbrs];
+    }
+
+    const str = JSON.stringify(searchSequence);
+    localStorage.searchSequence = JSON.stringify(searchSequence);
+  }
+
+  // now make the sequence refence itself recursively - this one we'll use
+  for (let i = searchSequence.length - 1; i >= 0; i--) {
+    for (let j = 2; j < searchSequence[i].length; j += 2) {
+      searchSequence[i][j] = searchSequence[searchSequence[i][j]];
     }
   }
 
-  // then this can actually be used in the search algorithm:
-  const map =
-      // filter out pixels with no neighbor info
-      searchSequence.filter(entry => entry.length > 2).reduce((map, entry) => {
-        map.set(pair(entry[0], entry[1]), entry.slice(2));
-        return map;
-      }, new Map());
-
   console.log(
-      'generate searchSequence: ' + (performance.now() - start).toFixed(0) +
-      'ms');
+      'read or generate searchSequence: ' +
+      (performance.now() - start).toFixed(0) + 'ms');
 
-  setTimeout(() => {
-    // store in localStorage
-    const mapStr = JSON.stringify([...map.entries()]);
-    console.log('storing ' + mapStr.length + ' bytes');
-    localStorage.searchSequence = mapStr;
-  }, 0);
-
-  return map;
+  return searchSequence;
 })();
 
 
@@ -288,8 +298,10 @@ function Bitmap() {
 
 // only create new bitmap on window resize
 let bitmap = new Bitmap();
+let bitmapAttached = false;
 window.addEventListener('resize', () => {
   bitmap = new Bitmap();
+  bitmapAttached = false;
 });
 
 
@@ -297,14 +309,18 @@ function renderVoronoi() {
   const start = performance.now();
 
   // init bitmap
-  bitmap.attachToDom();
+  if (!bitmapAttached) {
+    bitmap.attachToDom();
+    bitmapAttached = true;
+  }
   const width = bitmap.width;
   const height = bitmap.height;
 
   /***************/
   /** NUM CELLS **/
   /***************/
-  const numCells = Math.floor(width * height / 5000);
+  const numCells = parseInt(new URLSearchParams(location.search).get('n')) ||
+      Math.floor(width * height / 5000);
 
   // place cells
   const cells = (() => {
@@ -327,38 +343,68 @@ function renderVoronoi() {
   })();
 
   // precomputed dijkstra
-  const visited = new Array(height * width);
-  const priorityQueue =
+  const isSet = new Array(height * width);
+  // isSet[i] -> undefined = not visited; false = visited; true = set (final)
+  const bucketQueue =
       new MonotonicBucketQueue(/* maxConcurrentPriorities= */ 86);
   for (let id = 0; id < cells.length; id++) {
     const cell = cells[id];
-    visited[cell.x + width * cell.y] = true;
-    priorityQueue.push(0, {x: cell.x, y: cell.y, cell});
+    bucketQueue.push(0, {sequenceItem: searchSequence[0], cell: cell});
   }
-  while (priorityQueue.hasNext()) {
-    const {x, y, cell} = priorityQueue.pop();
-    bitmap.setPixel(x, y, cell.color);
-    const nbrs = searchSequenceMap.get(pair(x - cell.x, y - cell.y));
-    if (nbrs !== undefined) {
-      for (let i = 0; i < nbrs.length; i += 2) {
-        const nbrIndex = nbrs[i];
-        const nbrX = x + NBR_8[nbrIndex][0];
-        if (nbrX === -1 || nbrX === width) {  // check bounds
-          continue;
-        }
-        const nbrY = y + NBR_8[nbrIndex][1];
-        if (nbrY === -1 || nbrY === height) {  // check bounds
-          continue;
-        }
-        const visitedIndex = nbrX + width * nbrY;
-        if (visited[visitedIndex] === undefined) {
-          visited[visitedIndex] = true;
-          const priority = nbrs[i + 1];
-          priorityQueue.push(priority, {x: nbrX, y: nbrY, cell});
-        }
+  while (bucketQueue.hasNext()) {
+    const {sequenceItem, cell} = bucketQueue.pop();
+    const dx = sequenceItem[0];
+    const dy = sequenceItem[1];
+    const pixelX = cell.x + dx;
+    const pixelY = cell.y + dy;
+    const isSetIndex = pixelX + width * pixelY;
+    if (isSet[isSetIndex] === true) {
+      continue;
+    }
+    bitmap.setPixel(pixelX, pixelY, cell.color);
+    isSet[isSetIndex] = true;
+    for (let i = 2; i < sequenceItem.length; i += 2) {
+      const nbrSequenceItem = sequenceItem[i];
+      const nbrX = cell.x + nbrSequenceItem[0];
+      if (nbrX === -1 || nbrX === width) {  // check bounds
+        continue;
+      }
+      const nbrY = cell.y + nbrSequenceItem[1];
+      if (nbrY === -1 || nbrY === height) {  // check bounds
+        continue;
+      }
+      const isSetIndex = nbrX + width * nbrY;
+      switch (isSet[isSetIndex]) {
+        case undefined:
+          isSet[isSetIndex] = false;
+          // fall through
+        case false:
+          const nbrPriority = sequenceItem[i + 1];
+          bucketQueue.push(
+              nbrPriority, {sequenceItem: nbrSequenceItem, cell: cell});
       }
     }
   }
+
+  // fill in un-set pixels
+  for (let i = 0; i < isSet.length; i++) {
+    if (!isSet[i]) {
+      const x = i % width;
+      const y = (i - x) / width;
+      let closestCell;
+      let minDist = Infinity;
+      for (let j = 0; j < cells.length; j++) {
+        const cell = cells[j];
+        const dist = euclideanDist(x, y, cell.x, cell.y);
+        if (dist < minDist) {
+          minDist = dist;
+          closestCell = cell;
+        }
+      }
+      bitmap.setPixel(x, y, closestCell.color);
+    }
+  }
+
   bitmap.repaint();
 
   console.log('render: ' + (performance.now() - start).toFixed(0) + 'ms');
